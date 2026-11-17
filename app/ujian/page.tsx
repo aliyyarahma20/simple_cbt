@@ -15,6 +15,9 @@ import {
 import Sidebar from "@/components/layout/Sidebar";
 import Topbar from "@/components/layout/Topbar";
 import BottomNavigation from "@/components/layout/BottomNavigation";
+import SearchInput from "@/components/shared/SearchInput";
+import StatusBadge from "@/components/shared/StatusBadge";
+import EmptyState from "@/components/shared/EmptyState";
 
 type ExamStatus =
   | "Berlangsung"
@@ -219,28 +222,11 @@ export default function ExamListPage() {
 
               <div className="relative flex-1">
 
-                <Search
-                  size={19}
-                  className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"
-                />
-
-                <input
-                  type="text"
+                <SearchInput
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Cari ujian..."
-                  className="w-full h-[48px] pl-10 pr-10 bg-white border border-[#E5EDF5] rounded-[14px] text-sm outline-none placeholder:text-slate-400 focus:border-[#15395D] focus:ring-2 focus:ring-blue-100 transition"
+                  onChange={setSearchQuery}
+                  placeholder="Cari nama ujian atau mata pelajaran..."
                 />
-
-                {searchQuery && (
-                  <button
-                    onClick={() => setSearchQuery("")}
-                    aria-label="Hapus pencarian"
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
-                  >
-                    <X size={16} />
-                  </button>
-                )}
 
               </div>
 
@@ -338,11 +324,7 @@ export default function ExamListPage() {
 
                 <button
                   key={exam.id}
-                  onClick={() =>
-                    alert(
-                      `Detail ujian ${exam.subject} akan dikembangkan selanjutnya.`
-                    )
-                  }
+                  onClick={() => router.push(`/ujian/${exam.id}`)}
                   className="w-full text-left bg-white border border-[#E5EDF5] rounded-[16px] p-4 sm:p-5 hover:border-[#B9D1EA] hover:shadow-md transition-all duration-200 group"
                 >
 
@@ -379,9 +361,7 @@ export default function ExamListPage() {
 
                   <div className="mt-2.5">
 
-                    <span className={`inline-flex px-2.5 py-1 rounded-full text-[10px] sm:text-xs font-medium ${statusStyles[exam.status]}`}>
-                      {exam.status}
-                    </span>
+                    <StatusBadge status={exam.status} />
 
                   </div>
 
@@ -393,27 +373,13 @@ export default function ExamListPage() {
 
             {/* EMPTY STATE */}
             {filteredExams.length === 0 && (
-              <div className="bg-white border border-[#E5EDF5] rounded-2xl py-14 px-5 text-center mt-2">
-
-                <div className="w-14 h-14 bg-[#EAF3FC] rounded-full flex items-center justify-center mx-auto mb-4 text-[#2677C7]">
-                  <Search size={24} />
-                </div>
-
-                <h3 className="font-semibold text-[#15395D]">
-                  Ujian tidak ditemukan
-                </h3>
-
-                <p className="text-xs text-slate-400 mt-2">
-                  Coba gunakan kata kunci atau filter yang berbeda.
-                </p>
-
-                <button
-                  onClick={resetFilters}
-                  className="mt-4 text-sm text-blue-600 font-medium hover:underline"
-                >
-                  Reset pencarian
-                </button>
-
+              <div className="mt-2 rounded-2xl border border-[#E5EDF5] bg-white">
+                <EmptyState
+                  title="Ujian tidak ditemukan"
+                  description="Coba gunakan kata kunci atau filter yang berbeda."
+                  actionLabel="Reset pencarian"
+                  onAction={resetFilters}
+                />
               </div>
             )}
 

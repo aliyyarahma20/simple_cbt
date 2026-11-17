@@ -23,6 +23,7 @@ import {
 import Sidebar from "@/components/layout/Sidebar";
 import Topbar from "@/components/layout/Topbar";
 import BottomNavigation from "@/components/layout/BottomNavigation";
+import StatusBadge from "@/components/shared/StatusBadge";
 
 type Exam = {
   id: number;
@@ -379,13 +380,7 @@ export default function DashboardPage() {
                             {exam.subject}
                           </h3>
 
-                          <span className={`text-[9px] sm:text-[10px] font-semibold px-2 py-1 rounded-full ${
-                            ongoing
-                              ? "bg-[#E8F7F0] text-[#21965F]"
-                              : "bg-[#FFF2E6] text-[#D97706]"
-                          }`}>
-                            {exam.status}
-                          </span>
+                          <StatusBadge status={exam.status} />
                         </div>
 
                         <div className="flex items-center flex-wrap gap-x-4 gap-y-1 mt-3 text-[10px] sm:text-xs text-slate-400">
