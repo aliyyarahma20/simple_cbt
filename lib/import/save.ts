@@ -7,8 +7,6 @@ const BUCKET_GAMBAR = "question-images";
 
 const JENIS_UJIAN = new Set([
   "DAILY",
-  "UTS",
-  "UAS",
   "PTS",
   "PAS",
   "OTHER",
@@ -63,6 +61,46 @@ export async function simpanSatu(
     };
   }
 
+  // Bacaan: question_passages harus array (boleh kosong), passage_files opsional.
+  const passages = rows.question_passages ?? [];
+  const passageFiles = rows.passage_files ?? [];
+
+  if (!Array.isArray(passages) || !Array.isArray(passageFiles)) {
+    return {
+      file: f.file,
+      status: "DITOLAK",
+      alasan: "Struktur bacaan hasil parser tidak valid.",
+    };
+  }
+
+  // Tolak jika ada error validasi bacaan (rentang salah, nomor soal tidak ditemukan,
+  // rentang tumpang tindih, isi bacaan kosong). Error lain (mis. kunci kosong)
+  // tetap mengikuti alur lama. Untuk menolak SEMUA error, ganti filter menjadi f.errors.
+  const errorBacaan = (f.errors ?? []).filter((e) => e.startsWith("Bacaan"));
+  if (errorBacaan.length > 0) {
+    return {
+      file: f.file,
+      status: "DITOLAK",
+      alasan: `Bacaan bermasalah: ${errorBacaan[0]}`,
+    };
+  }
+
+  // Setiap passage_id pada soal harus punya pasangan di question_passages,
+  // dan setiap passage_id pada passage_files juga.
+  const passageIds = new Set(passages.map((p) => p.id));
+  const soalYatim = rows.questions.some(
+    (q) => q.passage_id && !passageIds.has(q.passage_id)
+  );
+  const berkasYatim = passageFiles.some((b) => !passageIds.has(b.passage_id));
+
+  if (soalYatim || berkasYatim) {
+    return {
+      file: f.file,
+      status: "DITOLAK",
+      alasan: "Relasi bacaan ke soal tidak konsisten.",
+    };
+  }
+
   if (!JENIS_UJIAN.has(String(exam.exam_type))) {
     return {
       file: f.file,
@@ -99,8 +137,12 @@ export async function simpanSatu(
   const uploadedPaths: string[] = [];
 
   try {
-    for (const questionFile of rows.question_files) {
-      const fileName = String(questionFile.file_name ?? "");
+    // Gambar soal dan gambar bacaan diupload dengan cara yang sama.
+    // Objek di dalam `rows` diubah langsung, sehingga storage_path ikut ter-update.
+    const semuaGambar = [...rows.question_files, ...passageFiles];
+
+    for (const berkas of semuaGambar) {
+      const fileName = String(berkas.file_name ?? "");
       const baseName = fileName.split(/[\\/]/).pop() ?? "";
 
       if (!baseName || baseName === "." || baseName === "..") {
@@ -125,7 +167,7 @@ export async function simpanSatu(
       if (error) throw new Error(`Upload gambar gagal: ${error.message}`);
 
       uploadedPaths.push(path);
-      questionFile.storage_path = `${BUCKET_GAMBAR}/${path}`;
+      berkas.storage_path = `${BUCKET_GAMBAR}/${path}`;
     }
 
     const { data, error } = await admin.rpc("import_exam_bundle", {

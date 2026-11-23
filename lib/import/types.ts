@@ -9,6 +9,8 @@ export interface MetaItem {
 export interface ImportRows {
   exams: Record<string, any>[];
   import_batches: Record<string, any>[];
+  question_passages: Record<string, any>[];
+  passage_files?: Record<string, any>[]; // hanya ada kalau bacaan punya gambar
   questions: Record<string, any>[];
   question_options: Record<string, any>[];
   question_files: Record<string, any>[];
@@ -26,12 +28,14 @@ export interface RingkasanSoal {
   rumus_bacaan: number;
   jumlah_bacaan: number;
   bacaan: {
+    id: string;
     mulai_no: number;
+    akhir_no: number;
+    jumlah_soal: number;
     cuplikan: string;
     gambar: number;
     rumus: number;
   }[];
-  acak_diizinkan: boolean;
 }
 
 export interface ParserFile {
@@ -43,6 +47,7 @@ export interface ParserFile {
   warnings: string[];
   errors: string[];
   soal?: unknown[];
+  bacaan?: unknown[];
   images?: Record<string, string>;
   rows?: ImportRows;
   ringkasan?: RingkasanSoal;

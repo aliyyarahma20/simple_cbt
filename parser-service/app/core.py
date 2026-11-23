@@ -1,7 +1,13 @@
 """Inti parser Simple-CBT. Dihasilkan dari notebook SimpleCBT_Bulk_Import_v2_DryRun.ipynb.
-Jika logika parser diubah, ubah di notebook lalu hasilkan ulang, atau edit file ini langsung dan samakan keduanya."""
+Jika logika parser diubah, ubah di notebook lalu hasilkan ulang, atau edit file ini langsung dan samakan keduanya.
 
-import re, os, io, json, glob, shutil, zipfile, uuid, difflib, base64, tempfile
+BACAAN (wacana) dikaitkan ke soal lewat RENTANG NOMOR SOAL, bukan urutan baris:
+  Word : [BACAAN 1-5] ... isi bacaan ... [SELESAI BACAAN]      (boleh di mana saja dalam [MULAI SOAL]..[SELESAI])
+  Excel: baris Jenis = BACAAN, kolom No = "1-5", kolom Soal = isi bacaan
+  Format lama tetap jalan: [DESKRIPSI] ... [SELESAI DESKRIPSI] (Word) dan baris BACAAN tanpa No (Excel)
+  berlaku untuk soal-soal berikutnya sampai bacaan berikutnya / penutup."""
+
+import re, os, io, json, glob, shutil, zipfile, uuid, difflib, base64, tempfile, datetime
 from docx import Document
 from docx.oxml.ns import qn
 from openpyxl import load_workbook
@@ -16,6 +22,90 @@ RE_OPSI  = re.compile(r"^\s*([A-E])[\.\)]\s+(.*)")
 RE_KUNCI = re.compile(r"^\s*(?:kunci|jawaban)\s*:\s*([A-Ea-e])?", re.I)
 RE_MULAI   = re.compile(r"^\[MULAI SOAL\]$", re.I)
 RE_SELESAI = re.compile(r"^\[SELESAI\]$", re.I)
+
+# [BACAAN 1-5] / [BACAAN 7] / [BACAAN] (tanpa rentang = format berurutan lama)
+RE_BACAAN_AWAL = re.compile(r"^\[BACAAN(?:\s+(.+?))?\]$", re.I)
+RE_RENTANG = re.compile(r"^\s*(\d+)\s*(?:[-–—]|s/d|sd|sampai|hingga)\s*(\d+)\s*$", re.I)
+RE_ANGKA   = re.compile(r"^\s*(\d+)(?:\.0+)?\s*$")
+MAKS_RENTANG = 500   # batas wajar jumlah soal dalam satu bacaan (cegah salah ketik 1-99999)
+
+PENUTUP_BACAAN = ("[SELESAI BACAAN]", "[BACAAN SELESAI]", "[SELESAI DESKRIPSI]", "[DESKRIPSI SELESAI]")
+PENUTUP_LAIN = ("[SELESAI PG]", "[PG SELESAI]",
+                "[SELESAI ESAI]", "[ESAI SELESAI]", "[SELESAI ESSAY]", "[ESSAY SELESAI]")
+
+
+def parse_rentang(raw):
+    """'1-5' -> (1, 5); '3' atau 3 -> (3, 3); kosong / tidak valid -> None."""
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return (int(raw), int(raw)) if raw == int(raw) else None
+    s = str(raw).strip()
+    if m := RE_RENTANG.match(s):
+        return int(m[1]), int(m[2])
+    if m := RE_ANGKA.match(s):
+        return int(m[1]), int(m[1])
+    return None
+
+
+class _Bacaan:
+    """Penampung bacaan, dipakai bersama oleh parse_docx_ex dan parse_xlsx_ex."""
+    def __init__(self):
+        self.daftar, self.terbuka, self.n = [], None, 0
+
+    def tambah(self, rentang, mentah, teks, rumus, gambar, posisi):
+        """rentang & mentah sama-sama None = bacaan berurutan (format lama)."""
+        berurutan = rentang is None and mentah is None
+        if berurutan:
+            if self.terbuka is not None:             # bacaan berurutan baru menutup yang lama
+                self.terbuka["posisi_akhir"] = posisi
+                self.terbuka = None
+            if not teks and not gambar:              # bacaan berurutan kosong = penutup
+                return None
+        self.n += 1
+        rec = {"id": f"B{self.n}", "urutan": self.n,
+               "mulai": rentang[0] if rentang else None,
+               "akhir": rentang[1] if rentang else None,
+               "rentang_mentah": mentah, "teks": teks, "rumus": rumus, "gambar": gambar,
+               "berurutan": berurutan, "posisi_mulai": posisi, "posisi_akhir": None}
+        self.daftar.append(rec)
+        if berurutan:
+            self.terbuka = rec
+        return rec
+
+    def selesai(self, soal_list, warnings):
+        """Ubah bacaan berurutan menjadi rentang nomor. Hasil: daftar bacaan final."""
+        hasil = []
+        for b in self.daftar:
+            if b["berurutan"]:
+                awal = b["posisi_mulai"]
+                akhir = b["posisi_akhir"] if b["posisi_akhir"] is not None else len(soal_list)
+                if awal >= akhir:
+                    warnings.append("Ada bacaan yang tidak diikuti soal.")
+                    continue
+                b["mulai"], b["akhir"] = soal_list[awal]["no"], soal_list[akhir - 1]["no"]
+            hasil.append(b)
+        return hasil
+
+
+def pasang_bacaan(soal_list, bacaan):
+    """Hubungkan tiap bacaan ke soal yang nomornya ada di dalam rentang (bukan berdasarkan urutan baris).
+    Setiap soal mendapat bacaan_id + salinan isi bacaan; soal pertama dalam grup ditandai bacaan_pertama."""
+    for s in soal_list:
+        s.update({"bacaan_id": None, "deskripsi": None, "deskripsi_rumus": [],
+                  "deskripsi_gambar": [], "terkait_deskripsi": False, "bacaan_pertama": False})
+    for b in bacaan:
+        if b["mulai"] is None or b["akhir"] is None or b["mulai"] > b["akhir"]:
+            continue
+        anggota = [s for s in soal_list if b["mulai"] <= s["no"] <= b["akhir"] and s["bacaan_id"] is None]
+        for i, s in enumerate(anggota):              # soal yang sudah punya bacaan (tumpang tindih) tidak ditimpa
+            s["bacaan_id"] = b["id"]
+            s["deskripsi"] = b["teks"] or None
+            s["deskripsi_rumus"] = list(b["rumus"])
+            s["deskripsi_gambar"] = list(b["gambar"])
+            s["terkait_deskripsi"] = True
+            s["bacaan_pertama"] = (i == 0)
+
 
 def semua_paragraf(doc):
     """Paragraf dalam urutan dokumen, termasuk yang ada di dalam tabel."""
@@ -51,29 +141,34 @@ def teks_dan_rumus(p):
             parts.append("{{rumus%d}}" % len(maths))
     return "".join(parts), maths
 
-def parse_docx(path, img_dir):
+def _simpan_blob(doc, rid, img_dir, nama_dasar):
+    part = doc.part.related_parts[rid]
+    ext = os.path.splitext(str(part.partname))[1] or ".png"
+    fname = f"{nama_dasar}{ext}"
+    with open(os.path.join(img_dir, fname), "wb") as f:
+        f.write(part.blob)
+    return fname
+
+
+def parse_docx_ex(path, img_dir):
     """
-    Membaca DOCX dengan section [PG], [ESAI], dan [DESKRIPSI].
+    Membaca DOCX dengan section [PG], [ESAI], dan bacaan:
+      [BACAAN 1-5] ... [SELESAI BACAAN]   -> bacaan untuk soal nomor 1 sampai 5
+      [DESKRIPSI] ... [SELESAI DESKRIPSI] -> format lama (berlaku untuk soal-soal berikutnya)
     Format lama tanpa section tetap dibaca sebagai PG.
-    Deskripsi ditempelkan pada soal pertama setelahnya; soal berikutnya
-    ditandai terkait_deskripsi sampai deskripsi berikutnya.
+    Hasil: (soal_list, warnings, bacaan)
     """
     doc = Document(path)
     os.makedirs(img_dir, exist_ok=True)
 
     soal_list, warnings = [], []
+    kb = _Bacaan()
     cur = None
     aktif = False
     ada_penanda = False
-    section = None
-    desc_buffer = []
-    desc_math = []
-    desc_images = []
-    pending_desc = None
-    pending_desc_math = []
-    pending_desc_images = []
-    group_active = False
-    desc_image_counter = 0
+    section = None        # jenis soal aktif: PG | ESAI | None
+    buf = None            # bacaan yang sedang dibaca
+    n_bacaan = 0          # penomoran nama file gambar bacaan
 
     def simpan_soal():
         nonlocal cur
@@ -90,16 +185,21 @@ def parse_docx(path, img_dir):
             return "{{rumus%d}}" % len(target["rumus"])
         return re.sub(r"\{\{rumus(\d+)\}\}", ganti, teks)
 
-    def simpan_gambar(paragraph, tujuan, no_):
-        hasil = []
-        for rid in paragraph._p.xpath(".//a:blip/@r:embed"):
-            part = doc.part.related_parts[rid]
-            ext = os.path.splitext(str(part.partname))[1] or ".png"
-            fname = f"{tujuan}{no_}_{len(hasil)+1}{ext}"
-            with open(os.path.join(img_dir, fname), "wb") as f:
-                f.write(part.blob)
-            hasil.append(fname)
-        return hasil
+    def buka_bacaan(arg):
+        nonlocal buf, n_bacaan
+        n_bacaan += 1
+        arg = (arg or "").strip()
+        buf = {"no": n_bacaan, "rentang": parse_rentang(arg) if arg else None, "mentah": arg or None,
+               "teks": [], "rumus": [], "gambar": [], "posisi": len(soal_list)}
+
+    def tutup_bacaan(paksa=False):
+        nonlocal buf
+        if buf is None:
+            return
+        b, buf = buf, None
+        if paksa:
+            warnings.append(f"Bacaan {b['mentah'] or '(berurutan)'}: tidak ditutup dengan [SELESAI BACAAN].")
+        kb.tambah(b["rentang"], b["mentah"], "\n".join(b["teks"]).strip(), b["rumus"], b["gambar"], b["posisi"])
 
     for p in semua_paragraf(doc):
         teks, maths = teks_dan_rumus(p)
@@ -117,69 +217,52 @@ def parse_docx(path, img_dir):
             upper = line.upper()
 
             if RE_MULAI.match(line):
-                simpan_soal()
+                simpan_soal(); tutup_bacaan(True)
                 aktif, ada_penanda, section = True, True, None
                 continue
 
             if upper in ("[SELESAI]", "[SELESAI SOAL]"):
-                simpan_soal()
+                simpan_soal(); tutup_bacaan(True)
                 aktif, section = False, None
                 continue
 
             if not aktif:
                 continue
 
-            if upper in ("[PG]", "[ESAI]", "[ESSAY]", "[DESKRIPSI]"):
-                simpan_soal()
-                section = {
-                    "[PG]": "PG",
-                    "[ESAI]": "ESAI",
-                    "[ESSAY]": "ESAI",
-                    "[DESKRIPSI]": "DESKRIPSI",
-                }[upper]
-                if section == "DESKRIPSI":
-                    desc_buffer, desc_math, desc_images = [], [], []
+            # penutup bacaan dicek lebih dulu supaya "[BACAAN SELESAI]" tidak terbaca sebagai pembuka
+            if upper in PENUTUP_BACAAN:
+                if buf is None:
+                    warnings.append(f"'{line}' tanpa pembuka [BACAAN ...]; diabaikan.")
+                else:
+                    tutup_bacaan()
                 continue
 
-            if upper in (
-                "[SELESAI PG]", "[PG SELESAI]",
-                "[SELESAI ESAI]", "[ESAI SELESAI]", "[SELESAI ESSAY]", "[ESSAY SELESAI]",
-                "[SELESAI DESKRIPSI]", "[DESKRIPSI SELESAI]",
-            ):
-                if section == "DESKRIPSI":
-                    pending_desc = "\n".join(desc_buffer).strip()
-                    pending_desc_math = list(desc_math)
-                    pending_desc_images = list(desc_images)
-                    if not pending_desc and not pending_desc_images:
-                        warnings.append("Section [DESKRIPSI] kosong.")
-                    group_active = bool(pending_desc or pending_desc_images)
+            m_b = RE_BACAAN_AWAL.match(line)
+            if m_b or upper == "[DESKRIPSI]":
+                simpan_soal(); tutup_bacaan(True)
+                buka_bacaan(m_b[1] if m_b else None)
+                continue
+
+            if upper in ("[PG]", "[ESAI]", "[ESSAY]"):
+                simpan_soal(); tutup_bacaan(True)
+                section = "PG" if upper == "[PG]" else "ESAI"
+                continue
+
+            if upper in PENUTUP_LAIN:
+                simpan_soal(); tutup_bacaan(True)
                 section = None
                 continue
 
-            if section == "DESKRIPSI":
-                desc_buffer.append(pakai_rumus(line, maths, {"rumus": desc_math}))
+            if buf is not None:                       # isi bacaan
+                buf["teks"].append(pakai_rumus(line, maths, {"rumus": buf["rumus"]}))
                 continue
 
             m = RE_SOAL.match(line)
             if m:
                 simpan_soal()
                 jenis = section if section in ("PG", "ESAI") else "PG"
-                cur = {
-                    "no": int(m[1]),
-                    "jenis": jenis,
-                    "soal": "",
-                    "opsi": {},
-                    "kunci": None,
-                    "gambar": [],
-                    "rumus": [],
-                    "deskripsi": pending_desc,
-                    "deskripsi_rumus": list(pending_desc_math),
-                    "deskripsi_gambar": list(pending_desc_images),
-                    "terkait_deskripsi": group_active,
-                }
-                pending_desc = None
-                pending_desc_math = []
-                pending_desc_images = []
+                cur = {"no": int(m[1]), "jenis": jenis, "soal": "", "opsi": {}, "kunci": None,
+                       "gambar": [], "rumus": []}
                 cur["soal"] = pakai_rumus(m[2], maths, cur)
                 continue
 
@@ -195,36 +278,31 @@ def parse_docx(path, img_dir):
             else:
                 warnings.append(f"Konten di luar soal diabaikan: '{line[:40]}'")
 
-        # Gambar pada paragraf masuk ke deskripsi atau soal sesuai section aktif.
+        # Gambar pada paragraf masuk ke bacaan atau soal yang sedang aktif.
         image_ids = id_gambar(p._p)
         if image_ids:
-            if section == "DESKRIPSI":
+            if buf is not None:
                 for rid in image_ids:
-                    desc_image_counter += 1
-                    part = doc.part.related_parts[rid]
-                    ext = os.path.splitext(str(part.partname))[1] or ".png"
-                    fname = f"deskripsi_{desc_image_counter}{ext}"
-                    with open(os.path.join(img_dir, fname), "wb") as f:
-                        f.write(part.blob)
-                    desc_images.append(fname)
+                    buf["gambar"].append(_simpan_blob(doc, rid, img_dir, f"bacaan{buf['no']}_{len(buf['gambar'])+1}"))
             elif cur is not None:
                 for rid in image_ids:
-                    part = doc.part.related_parts[rid]
-                    ext = os.path.splitext(str(part.partname))[1] or ".png"
-                    fname = f"soal{cur['no']}_{len(cur['gambar'])+1}{ext}"
-                    with open(os.path.join(img_dir, fname), "wb") as f:
-                        f.write(part.blob)
-                    cur["gambar"].append(fname)
+                    cur["gambar"].append(_simpan_blob(doc, rid, img_dir, f"soal{cur['no']}_{len(cur['gambar'])+1}"))
 
     simpan_soal()
+    tutup_bacaan(True)
 
     if not ada_penanda:
         warnings.append("Penanda [MULAI SOAL] tidak ditemukan; gunakan Template_Soal_SimpleCBT.docx.")
-    if pending_desc:
-        warnings.append("Ada deskripsi yang tidak diikuti soal.")
-    if any(s.get("terkait_deskripsi") for s in soal_list):
-        warnings.append("Dokumen memiliki deskripsi: urutan soal harus dipertahankan dan pengacakan dinonaktifkan.")
-    return soal_list, warnings
+
+    bacaan = kb.selesai(soal_list, warnings)
+    pasang_bacaan(soal_list, bacaan)
+    return soal_list, warnings, bacaan
+
+
+def parse_docx(path, img_dir):
+    """Kompatibel dengan versi lama: hanya (soal_list, warnings). Pakai parse_docx_ex untuk daftar bacaan."""
+    soal, warn, _ = parse_docx_ex(path, img_dir)
+    return soal, warn
 
 def _n(t):
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", str(t).lower())).strip()
@@ -251,7 +329,7 @@ def cari_header(ws, maks_baris=30):
 JENIS_XLSX = {
     "PG": "PG", "PILIHAN GANDA": "PG",
     "ESSAI": "ESAI", "ESAI": "ESAI", "ESSAY": "ESAI",
-    "BACAAN": "BACAAN",
+    "BACAAN": "BACAAN", "WACANA": "BACAAN", "DESKRIPSI": "BACAAN",
 }
 
 def normalisasi_jenis(raw):
@@ -317,16 +395,17 @@ def cari_file_gambar(nama, folder):
                 if f.lower() == nama.strip().strip('"').lower(): return os.path.join(d, f)
     return None
 
-def parse_xlsx(path, img_dir):
+def parse_xlsx_ex(path, img_dir):
     """
     Kolom 'Jenis' (opsional): PG | ESSAI | BACAAN.
       - tanpa kolom Jenis / sel kosong  -> PG (kompatibel dengan format lama)
-      - BACAAN: teks di kolom Soal disimpan sebagai bacaan aktif, BUKAN soal.
-                Berlaku untuk soal-soal berikutnya sampai ada BACAAN baru
-                atau baris BACAAN dengan Soal kosong (penutup).
+      - BACAAN: teks di kolom Soal adalah isi bacaan, BUKAN soal.
+          * kolom No berisi rentang ("1-5", "7") -> bacaan untuk soal dengan nomor tersebut,
+            letak barisnya bebas (boleh di atas, di tengah, atau di bawah).
+          * kolom No kosong -> format lama: berlaku untuk soal-soal berikutnya sampai ada BACAAN baru
+            atau baris BACAAN kosong (penutup).
       - ESSAI : tanpa opsi dan tanpa kunci.
-    Keluaran mengikuti struktur parse_docx (deskripsi, deskripsi_rumus,
-    deskripsi_gambar, terkait_deskripsi).
+    Hasil: (soal_list, warnings, bacaan)
     """
     wb = load_workbook(path)
     ws = cari_sheet_soal(wb)
@@ -340,13 +419,6 @@ def parse_xlsx(path, img_dir):
     img_by_row = {}
     for img in ws._images:
         img_by_row.setdefault(img.anchor._from.row + 1, []).append((img._data(), (img.format or "png").lower()))
-
-    desc_counter = 0
-
-    def nama_desc(i, ext):
-        nonlocal desc_counter
-        desc_counter += 1
-        return f"deskripsi_{desc_counter}{ext}"
 
     def ambil_gambar(r, nama_fn, label):
         """Gambar tempel di baris + gambar lewat kolom nama file."""
@@ -367,8 +439,7 @@ def parse_xlsx(path, img_dir):
         return hasil
 
     out = []
-    pending = None          # bacaan yang belum dipasang ke soal pertama
-    group_active = False    # ada bacaan aktif -> soal ditandai terkait_deskripsi
+    kb = _Bacaan()
 
     for r in range(hr + 1, min(ws.max_row, hr + 2000) + 1):
         g = lambda k: ws.cell(r, kol[k]).value if k in kol else None
@@ -377,14 +448,14 @@ def parse_xlsx(path, img_dir):
 
         # ---------- BACAAN: bukan soal ----------
         if jenis == "BACAAN":
-            gambar_b = ambil_gambar(r, nama_desc, f"Baris {r} (BACAAN)")
-            if pending is not None:
-                warnings.append("Ada bacaan yang tidak diikuti soal.")
-            if not teks and not gambar_b:          # BACAAN kosong = penutup bacaan aktif
-                pending, group_active = None, False
-                continue
-            pending = {"teks": teks, "rumus": re.findall(r"\$([^$]+)\$", teks), "gambar": gambar_b}
-            group_active = True
+            gambar_b = ambil_gambar(r, lambda i, e, _r=r: f"bacaan_baris{_r}_{i}{e}", f"Baris {r} (BACAAN)")
+            raw_no = g("no")
+            mentah = None if raw_no in (None, "") else str(raw_no).strip()
+            rentang = parse_rentang(raw_no) if mentah else None
+            if mentah and rentang is None and isinstance(raw_no, (datetime.date, datetime.datetime)):
+                warnings.append(f"Baris {r} (BACAAN): kolom No terbaca Excel sebagai tanggal ('{mentah}'). "
+                                f"Ubah format sel kolom No menjadi Teks, lalu ketik ulang rentangnya (mis. 1-5).")
+            kb.tambah(rentang, mentah, teks, re.findall(r"\$([^$]+)\$", teks), gambar_b, len(out))
             continue
 
         if not teks: continue                       # baris kosong diabaikan
@@ -407,24 +478,58 @@ def parse_xlsx(path, img_dir):
 
         gambar = ambil_gambar(r, lambda i, e, _no=no: f"soal{_no}_{i}{e}", f"No {no}")
 
-        d, pending = pending, None
         out.append({
             "no": no, "jenis": jenis, "soal": teks, "opsi": opsi, "kunci": kunci,
             "gambar": gambar, "rumus": re.findall(r"\$([^$]+)\$", teks_semua),   # rumus ditulis $...$
-            "deskripsi": d["teks"] if d else None,
-            "deskripsi_rumus": d["rumus"] if d else [],
-            "deskripsi_gambar": d["gambar"] if d else [],
-            "terkait_deskripsi": group_active,
         })
 
-    if pending is not None:
-        warnings.append("Ada bacaan yang tidak diikuti soal.")
-    if any(s["terkait_deskripsi"] for s in out):
-        warnings.append("Dokumen memiliki bacaan: urutan soal harus dipertahankan dan pengacakan dinonaktifkan.")
-    return out, warnings
+    bacaan = kb.selesai(out, warnings)
+    pasang_bacaan(out, bacaan)
+    return out, warnings, bacaan
 
-def validasi(soal_list):
-    """Validasi berbeda untuk PG dan ESAI; blok deskripsi bukan item soal."""
+
+def parse_xlsx(path, img_dir):
+    """Kompatibel dengan versi lama: hanya (soal_list, warnings). Pakai parse_xlsx_ex untuk daftar bacaan."""
+    soal, warn, _ = parse_xlsx_ex(path, img_dir)
+    return soal, warn
+
+
+def _ringkas_nomor(nomor, maks=10):
+    s = ", ".join(map(str, nomor[:maks]))
+    return s + (" ..." if len(nomor) > maks else "")
+
+def validasi_bacaan(soal_list, bacaan):
+    """Periksa rentang bacaan: format, nomor soal yang tidak ada, tumpang tindih, isi kosong."""
+    errs, valid = [], []
+    nomor = {s["no"] for s in soal_list}
+    for b in bacaan:
+        label = "Bacaan " + (b.get("rentang_mentah") or f"{b['mulai']}-{b['akhir']}")
+        if b["mulai"] is None or b["akhir"] is None:
+            errs.append(f"{label}: rentang nomor tidak valid (tulis seperti 1-5)")
+            continue
+        if b["mulai"] > b["akhir"]:
+            errs.append(f"{label}: rentang terbalik (awal lebih besar dari akhir)")
+            continue
+        if b["akhir"] - b["mulai"] + 1 > MAKS_RENTANG:
+            errs.append(f"{label}: rentang terlalu besar (maksimal {MAKS_RENTANG} soal)")
+            continue
+        if not (b.get("teks") or "").strip() and not b.get("gambar"):
+            errs.append(f"{label}: isi bacaan kosong")
+        hilang = [n for n in range(b["mulai"], b["akhir"] + 1) if n not in nomor]
+        if hilang:
+            errs.append(f"{label}: nomor soal {_ringkas_nomor(hilang)} tidak ditemukan")
+        valid.append((b["mulai"], b["akhir"], label))
+    valid.sort()
+    for i in range(len(valid)):
+        for j in range(i + 1, len(valid)):
+            a, c = valid[i], valid[j]
+            if c[0] > a[1]:
+                break                                  # terurut: sisanya pasti tidak beririsan dengan a
+            errs.append(f"{a[2]} dan {c[2]}: rentang tumpang tindih (nomor {c[0]}-{min(a[1], c[1])})")
+    return errs
+
+def validasi(soal_list, bacaan=None):
+    """Validasi berbeda untuk PG dan ESAI; bacaan divalidasi lewat rentangnya (bukan item soal)."""
     errs, seen = [], set()
     for s in soal_list:
         n = s["no"]
@@ -454,6 +559,7 @@ def validasi(soal_list):
             # Esai tidak memerlukan opsi maupun kunci jawaban.
             continue
 
+    errs += validasi_bacaan(soal_list, bacaan or [])
     return errs
 
 
@@ -463,11 +569,27 @@ import difflib, uuid
 # ---- Nilai enum DB: SESUAIKAN dengan isi enum di Supabase ----
 ENUM = {
     "question_type": "MULTIPLE_CHOICE",
+    "question_type_esai": "ESSAY",   # SESUAIKAN dengan label enum question_type untuk esai di Supabase
     "exam_status":   "DRAFT",
     "import_status": "PENDING",
     "file_type_doc": {"docx": "DOCX", "xlsx": "XLSX"},
     "file_type_img": "IMAGE",
-    "exam_type":     {"PAS": "PAS", "PTS": "PTS", "KUIS": "QUIZ"},
+    "exam_type": {
+        "PAS": "PAS",
+        "UAS": "PAS",
+
+        "PTS": "PTS",
+        "UTS": "PTS",
+
+        "ULANGAN HARIAN": "DAILY",
+        "UH": "DAILY",
+        "KUIS": "DAILY",
+        "QUIZ": "DAILY",
+        "DAILY": "DAILY",
+
+        "LAINNYA": "OTHER",
+        "OTHER": "OTHER"
+    }
 }
 MODE_DB_BARU = False   # False = hanya kolom yang SUDAH ADA di DB; True = ikut kolom usulan (subject_id, review_level, dst.)
 
@@ -622,8 +744,11 @@ def tentukan_level(n_soal, errs, meta, warn):
     return "GREEN"
 
 def to_rows(paket, meta, info, level, warn, job_id, uploaded_by="<UUID_AKUN_LOGIN>", owner=None):
+    """paket = {"sumber": ..., "soal": [...], "bacaan": [...]}.
+    Satu bacaan -> satu baris question_passages; setiap soal dalam rentangnya mendapat questions.passage_id."""
     exam_id, batch_id = str(uuid.uuid4()), str(uuid.uuid4())
-    soal = paket["soal"]; errs = validasi(soal)
+    soal = paket["soal"]; bacaan = paket.get("bacaan") or []
+    errs = validasi(soal, bacaan)
     gagal = {int(m[1]) for e in errs if (m := re.match(r"No (\d+):", e))}
     base = os.path.basename(paket["sumber"]); ext = os.path.splitext(base)[1][1:].lower()
     mp, kl, jn = (meta[k]["nilai"] for k in ("mapel", "kelas", "jenis"))
@@ -643,12 +768,37 @@ def to_rows(paket, meta, info, level, warn, job_id, uploaded_by="<UUID_AKUN_LOGI
         exam["subject_id"] = mp          # nanti diganti id dari tabel subjects
         batch.update({"job_id": job_id, "source_path": paket["sumber"], "detected": meta,
                       "warnings": warn, "review_level": level})
-    rows = {"exams": [exam], "import_batches": [batch], "questions": [], "question_options": [], "question_files": []}
+    rows = {
+        "exams": [exam],
+        "import_batches": [batch],
+        "question_passages": [],
+        "questions": [],
+        "question_options": [],
+        "question_files": []
+    }
+
+    # ---- bacaan: satu record per bacaan yang benar-benar punya soal ----
+    dipakai = {s.get("bacaan_id") for s in soal if s.get("bacaan_id")}
+    passage_ids = {}
+    for no, b in enumerate(sorted((b for b in bacaan if b["id"] in dipakai), key=lambda b: (b["mulai"], b["akhir"])), 1):
+        pid = str(uuid.uuid4())
+        passage_ids[b["id"]] = pid
+        rows["question_passages"].append({
+            "id": pid, "exam_id": exam_id, "passage_number": no, "passage_text": b["teks"],
+            "start_question_number": b["mulai"], "end_question_number": b["akhir"],
+        })
+        for fn_ in b["gambar"]:      # tabel passage_files hanya muncul bila ada gambar bacaan
+            rows.setdefault("passage_files", []).append({
+                "id": str(uuid.uuid4()), "passage_id": pid, "file_type": ENUM["file_type_img"],
+                "file_name": fn_, "storage_path": f"passages/{exam_id}/{fn_}"})
+
     for s in soal:
         qid = str(uuid.uuid4())
         q = {"id": qid, "exam_id": exam_id, "import_batch_id": batch_id, "question_number": s["no"],
-             "question_type": ENUM["question_type"], "question_text": s["soal"],
-             "correct_answer": s["kunci"], "points": 1}
+             "question_type": ENUM["question_type_esai"] if str(s.get("jenis", "PG")).upper() == "ESAI" else ENUM["question_type"],
+             "question_text": s["soal"],
+             "correct_answer": s["kunci"], "points": 1,
+             "passage_id": passage_ids.get(s.get("bacaan_id"))}
         if MODE_DB_BARU: q.update({"needs_review": s["no"] in gagal, "import_warnings": [e for e in errs if e.startswith(f"No {s['no']}:")]})
         rows["questions"].append(q)
         for lab, txt in s["opsi"].items():
@@ -661,14 +811,18 @@ def to_rows(paket, meta, info, level, warn, job_id, uploaded_by="<UUID_AKUN_LOGI
 def cek_integritas(semua_rows):
     masalah, qids, nomor = [], set(), set()
     for r in semua_rows:
+        pids = {p["id"] for p in r.get("question_passages", [])}
         for q in r["questions"]:
             qids.add(q["id"])
             if (q["exam_id"], q["question_number"]) in nomor: masalah.append(f"nomor ganda di exam {q['exam_id'][:8]}: {q['question_number']}")
             nomor.add((q["exam_id"], q["question_number"]))
             labels = {o["option_label"] for o in r["question_options"] if o["question_id"] == q["id"]}
             if q["correct_answer"] and q["correct_answer"] not in labels: masalah.append(f"kunci {q['correct_answer']} tidak ada di opsi (soal {q['question_number']})")
+            if q.get("passage_id") and q["passage_id"] not in pids: masalah.append(f"passage_id tidak ditemukan (soal {q['question_number']})")
         for t in ("question_options", "question_files"):
             masalah += [f"{t} yatim: {x['id'][:8]}" for x in r[t] if x["question_id"] not in qids]
+        terpakai = {q.get("passage_id") for q in r["questions"]}
+        masalah += [f"bacaan {p['passage_number']} tidak punya soal" for p in r.get("question_passages", []) if p["id"] not in terpakai]
     return masalah
 
 # ================= KONFIGURASI DARI LINGKUNGAN =================
@@ -678,40 +832,38 @@ MODE_DB_BARU = os.environ.get("MODE_DB_BARU", "0") == "1"
 
 
 # ============================================================================
-# TAMBAHAN untuk parser Simple-CBT (taruh di atas proses_file)
+# Ringkasan untuk halaman pratinjau Simple-CBT
 # ============================================================================
 
 def ringkasan_soal(data):
-    """Ringkasan hasil parsing untuk halaman pratinjau."""
+    """Ringkasan hasil parsing untuk halaman pratinjau. Bacaan dihitung SEKALI per bacaan (bukan per soal)."""
 
     jenis = lambda s: str(s.get("jenis", "PG")).upper()
     n = lambda s, k: len(s.get(k) or [])
 
-    bacaan = []
-
+    grup = {}
     for s in data:
-        if (
-            s.get("deskripsi")
-            or s.get("deskripsi_gambar")
-            or s.get("deskripsi_rumus")
-        ):
-            bacaan.append({
-                "mulai_no": s["no"],
-                "cuplikan": (
-                    s.get("deskripsi") or "(hanya gambar/rumus)"
-                )[:80],
-                "gambar": n(s, "deskripsi_gambar"),
-                "rumus": n(s, "deskripsi_rumus"),
-            })
+        bid = s.get("bacaan_id")
+        if not bid:
+            continue
+        g = grup.setdefault(bid, {
+            "id": bid, "mulai_no": s["no"], "akhir_no": s["no"], "jumlah_soal": 0,
+            "cuplikan": (s.get("deskripsi") or "(hanya gambar/rumus)")[:80],
+            "gambar": n(s, "deskripsi_gambar"), "rumus": n(s, "deskripsi_rumus"),
+        })
+        g["mulai_no"] = min(g["mulai_no"], s["no"])
+        g["akhir_no"] = max(g["akhir_no"], s["no"])
+        g["jumlah_soal"] += 1
+    bacaan = sorted(grup.values(), key=lambda g: g["mulai_no"])
 
     pg = sum(1 for s in data if jenis(s) == "PG")
     esai = sum(1 for s in data if jenis(s) == "ESAI")
 
     g_s = sum(n(s, "gambar") for s in data)
-    g_b = sum(n(s, "deskripsi_gambar") for s in data)
+    g_b = sum(b["gambar"] for b in bacaan)
 
     r_s = sum(n(s, "rumus") for s in data)
-    r_b = sum(n(s, "deskripsi_rumus") for s in data)
+    r_b = sum(b["rumus"] for b in bacaan)
 
     return {
         "jumlah_pg": pg,
@@ -728,12 +880,7 @@ def ringkasan_soal(data):
 
         "jumlah_bacaan": len(bacaan),
         "bacaan": bacaan,
-
-        "acak_diizinkan": len(bacaan) == 0,
     }
-
-# Di proses_file, pada hasil.update({...}) tambahkan satu baris:
-#     "ringkasan": ringkasan_soal(data),
 
 # ================= PROSES SATU FILE =================
 def proses_file(path, rel, daftar_guru, mode="POKJA", uploader_id="<UUID_AKUN_LOGIN>",
@@ -741,9 +888,10 @@ def proses_file(path, rel, daftar_guru, mode="POKJA", uploader_id="<UUID_AKUN_LO
     """Baca satu file soal -> hasil deteksi, validasi, level (GREEN/YELLOW/RED), dan baris tabel (dry-run)."""
     img_dir = img_dir or tempfile.mkdtemp(prefix="img_"); os.makedirs(img_dir, exist_ok=True)
     job_id = job_id or str(uuid.uuid4())
-    hasil = {"file": rel, "level": "RED", "jumlah_soal": 0, "meta": {}, "info": {}, "warnings": [], "errors": [], "soal": []}
+    hasil = {"file": rel, "level": "RED", "jumlah_soal": 0, "meta": {}, "info": {}, "warnings": [], "errors": [], "soal": [], "bacaan": []}
     try:
-        data, parse_warn = (parse_docx if path.lower().endswith(".docx") else parse_xlsx)(path, img_dir)
+        parser = parse_docx_ex if path.lower().endswith(".docx") else parse_xlsx_ex
+        data, parse_warn, bacaan = parser(path, img_dir)
         info = baca_info(path)
     except Exception as e:                                   # satu file rusak tidak boleh menjatuhkan layanan
         hasil["errors"] = [f"Gagal dibaca: {type(e).__name__}: {e}"]
@@ -767,27 +915,17 @@ def proses_file(path, rel, daftar_guru, mode="POKJA", uploader_id="<UUID_AKUN_LO
         warn += gwarn
         if not g: warn.append("pemilik (guru) belum terdeteksi: pilih manual di inbox")
 
-    errs = validasi(data)
+    errs = validasi(data, bacaan)
     if not data:
         errs = ["Tidak ada soal terbaca (format tidak sesuai template?)"] + errs
 
-    # Konversi rows DB lama hanya aman untuk PG tanpa deskripsi.
-    # Untuk ESAI/deskripsi, tahan dulu sampai tahap perubahan skema DB.
-    rows_aman = all(
-        str(s.get("jenis", "PG")).upper() == "PG"
-        and not s.get("terkait_deskripsi")
-        and not s.get("deskripsi")
-        for s in data
-    )
-    if sertakan_rows and data and not rows_aman:
-        warn.append("Rows DB belum dibuat: parser sudah membaca ESAI/deskripsi, tetapi pemetaan DB dikerjakan pada tahap berikutnya.")
-
+    # Bacaan -> question_passages + questions.passage_id. Esai -> questions (tanpa opsi, tanpa kunci).
     level = tentukan_level(len(data), errs, meta, warn)
     hasil.update({"level": level, "jumlah_soal": len(data), "meta": meta, "info": info,
-                  "warnings": warn, "errors": errs, "soal": data,
-                  "ringkasan": ringkasan_soal(data), "acak_diizinkan": not any(s.get("terkait_deskripsi") for s in data)})
-    if sertakan_rows and data and rows_aman:
-        hasil["rows"] = to_rows({"sumber": rel, "soal": data}, meta, info, level, warn, job_id,
+                  "warnings": warn, "errors": errs, "soal": data, "bacaan": bacaan,
+                  "ringkasan": ringkasan_soal(data)})
+    if sertakan_rows and data:
+        hasil["rows"] = to_rows({"sumber": rel, "soal": data, "bacaan": bacaan}, meta, info, level, warn, job_id,
                                 uploaded_by=uploader_id, owner=owner)
     if sertakan_gambar:
         hasil["images"] = {f: base64.b64encode(open(os.path.join(img_dir, f), "rb").read()).decode()
