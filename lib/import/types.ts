@@ -16,8 +16,27 @@ export interface ImportRows {
   question_files: Record<string, any>[];
 }
 
+export type OpsiSoal = { label: string; teks: string; benar?: boolean };
+
+export type ItemPeriksa = {
+  id: string;
+  tipe: "bacaan" | "soal";
+  teks: string;
+  gambar?: string[];
+  rumus?: string[];
+  peringatan?: string[];
+  no?: number;
+  jenis?: "PG" | "PGK" | "ESAI" | "LAIN";
+  opsi?: OpsiSoal[];
+  kunci?: string;
+  bacaan_no?: number;
+  no_mulai?: number;
+  jumlah_soal?: number;
+};
+
 export interface RingkasanSoal {
   jumlah_pg: number;
+  jumlah_pgk: number;
   jumlah_esai: number;
   jumlah_lain: number;
   jumlah_gambar: number;
@@ -70,6 +89,7 @@ export interface PratinjauFile {
   guru: string | null;
   ringkasan?: RingkasanSoal;
   catatan: string[];
+  butir?: ItemPeriksa[];
 }
 
 export interface HasilSimpan {

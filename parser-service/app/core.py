@@ -19,7 +19,7 @@ _VML = "urn:schemas-microsoft-com:vml"
 
 RE_SOAL  = re.compile(r"^\s*(\d+)[\.\)]\s+(.*)")
 RE_OPSI  = re.compile(r"^\s*([A-E])[\.\)]\s+(.*)")
-RE_KUNCI = re.compile(r"^\s*(?:kunci|jawaban)\s*:\s*([A-Ea-e])?", re.I)
+RE_KUNCI = re.compile(r"^\s*(?:kunci|jawaban)\s*:\s*(.*)$", re.I)   # grup 1 = seluruh isi kunci, mis. "B" atau "A, C"
 RE_MULAI   = re.compile(r"^\[MULAI SOAL\]$", re.I)
 RE_SELESAI = re.compile(r"^\[SELESAI\]$", re.I)
 
@@ -32,6 +32,31 @@ MAKS_RENTANG = 500   # batas wajar jumlah soal dalam satu bacaan (cegah salah ke
 PENUTUP_BACAAN = ("[SELESAI BACAAN]", "[BACAAN SELESAI]", "[SELESAI DESKRIPSI]", "[DESKRIPSI SELESAI]")
 PENUTUP_LAIN = ("[SELESAI PG]", "[PG SELESAI]",
                 "[SELESAI ESAI]", "[ESAI SELESAI]", "[SELESAI ESSAY]", "[ESSAY SELESAI]")
+
+
+RE_PISAH_KUNCI = re.compile(r"[\s,;/&+]+|\bdan\b", re.I)
+
+def huruf_kunci(raw):
+    """Huruf kunci dari teks, urut & tanpa duplikat.
+    'B' -> ['B'];  'A, C' / 'A,C' / 'A dan C' / 'A & C' / 'AC' -> ['A', 'C'];
+    'B. Jakarta' -> ['B'] (diawali 'B.' / 'B)'); selain itu []."""
+    s = str(raw or "").strip()
+    if not s:
+        return []
+    token = [t.rstrip(".)") for t in RE_PISAH_KUNCI.split(s) if t and t.strip()]
+    if token and all(re.fullmatch(r"[A-Ea-e]+", t) for t in token):
+        return sorted({c.upper() for t in token for c in t})
+    if m := re.match(r"^([A-Ea-e])[\.\)]\s", s + " "):
+        return [m[1].upper()]
+    return []
+
+def kunci_ke_teks(huruf):
+    """['A','C'] -> 'A,C'; kosong -> None."""
+    return ",".join(huruf) if huruf else None
+
+def kunci_ganda(kunci):
+    """'A,C' -> ['A','C']; 'B' -> ['B']; None -> []."""
+    return [k for k in str(kunci or "").split(",") if k]
 
 
 def parse_rentang(raw):
@@ -267,10 +292,12 @@ def parse_docx_ex(path, img_dir):
                 continue
 
             if cur is not None:
-                if cur["jenis"] == "PG" and (mo := RE_OPSI.match(line)):
+                if cur["jenis"] in ("PG", "PGK") and (mo := RE_OPSI.match(line)):
                     cur["opsi"][mo[1]] = pakai_rumus(mo[2], maths, cur)
-                elif cur["jenis"] == "PG" and (mk := RE_KUNCI.match(line)):
-                    cur["kunci"] = (mk[1] or "").upper() or None
+                elif cur["jenis"] in ("PG", "PGK") and (mk := RE_KUNCI.match(line)):
+                    huruf = huruf_kunci(mk[1])
+                    cur["kunci"] = kunci_ke_teks(huruf)
+                    cur["jenis"] = "PGK" if len(huruf) > 1 else "PG"     # kunci lebih dari satu = pilihan ganda kompleks
                 elif cur["jenis"] == "ESAI" and RE_KUNCI.match(line):
                     warnings.append(f"No {cur['no']}: kunci pada soal esai diabaikan.")
                 else:
@@ -328,6 +355,7 @@ def cari_header(ws, maks_baris=30):
 # Nilai kolom Jenis -> nama internal (sama dengan parse_docx: "PG", "ESAI"; plus "BACAAN")
 JENIS_XLSX = {
     "PG": "PG", "PILIHAN GANDA": "PG",
+    "PGK": "PGK", "PG KOMPLEKS": "PGK", "PILIHAN GANDA KOMPLEKS": "PGK", "MULTIPLE ANSWER": "PGK",
     "ESSAI": "ESAI", "ESAI": "ESAI", "ESSAY": "ESAI",
     "BACAAN": "BACAAN", "WACANA": "BACAAN", "DESKRIPSI": "BACAAN",
 }
@@ -379,6 +407,7 @@ def normalisasi_kunci(raw, opsi):
     """Terima 'B', 'b', 'B.', 'B. Jakarta', atau teks jawaban yang sama dengan salah satu opsi."""
     if raw is None or str(raw).strip() == "": return None
     s = str(raw).strip()
+    if len(huruf := huruf_kunci(s)) > 1: return ",".join(huruf)      # kunci ganda: 'A, C' -> 'A,C'
     if m := re.fullmatch(r"([A-Ea-e])[\.\)]?", s): return m[1].upper()
     if m := re.match(r"^([A-Ea-e])[\.\)]\s+\S", s): return m[1].upper()
     if _n(s):
@@ -474,6 +503,8 @@ def parse_xlsx_ex(path, img_dir):
         else:   # PG (jenis tak dikenal juga lewat sini; validasi() yang menandai errornya)
             opsi  = {k: str(g(k)).strip() for k in "ABCDE" if g(k) not in (None, "")}
             kunci = normalisasi_kunci(g("kunci"), opsi)
+            if jenis == "PG" and kunci and "," in kunci:
+                jenis = "PGK"                       # PG dengan kunci lebih dari satu = pilihan ganda kompleks
             teks_semua = teks + " " + " ".join(opsi.values())
 
         gambar = ambil_gambar(r, lambda i, e, _no=no: f"soal{_no}_{i}{e}", f"No {no}")
@@ -539,20 +570,25 @@ def validasi(soal_list, bacaan=None):
             errs.append(f"No {n}: nomor duplikat")
         seen.add(n)
 
-        if jenis not in ("PG", "ESAI"):
+        if jenis not in ("PG", "PGK", "ESAI"):
             errs.append(f"No {n}: jenis soal '{jenis}' tidak dikenali")
             continue
 
         if not str(s.get("soal") or "").strip():
             errs.append(f"No {n}: teks soal kosong")
 
-        if jenis == "PG":
+        if jenis in ("PG", "PGK"):
             opsi = s.get("opsi") or {}
             kunci = s.get("kunci")
             if len(opsi) < 2:
                 errs.append(f"No {n}: opsi kurang dari 2")
             if not kunci:
                 errs.append(f"No {n}: kunci jawaban belum diisi")
+            elif jenis == "PGK":
+                huruf = kunci_ganda(kunci)
+                if len(huruf) < 2:
+                    errs.append(f"No {n}: soal PGK butuh minimal 2 kunci")
+                errs += [f"No {n}: kunci '{h}' tidak ada di opsi" for h in huruf if h not in opsi]
             elif kunci not in opsi:
                 errs.append(f"No {n}: kunci '{kunci}' tidak ada di opsi")
         elif jenis == "ESAI":
@@ -570,6 +606,7 @@ import difflib, uuid
 ENUM = {
     "question_type": "MULTIPLE_CHOICE",
     "question_type_esai": "ESSAY",   # SESUAIKAN dengan label enum question_type untuk esai di Supabase
+    "question_type_pgk":  "MULTIPLE_ANSWER",   # pilihan ganda kompleks; tambahkan ke enum: alter type question_type add value 'MULTIPLE_ANSWER';
     "exam_status":   "DRAFT",
     "import_status": "PENDING",
     "file_type_doc": {"docx": "DOCX", "xlsx": "XLSX"},
@@ -795,7 +832,8 @@ def to_rows(paket, meta, info, level, warn, job_id, uploaded_by="<UUID_AKUN_LOGI
     for s in soal:
         qid = str(uuid.uuid4())
         q = {"id": qid, "exam_id": exam_id, "import_batch_id": batch_id, "question_number": s["no"],
-             "question_type": ENUM["question_type_esai"] if str(s.get("jenis", "PG")).upper() == "ESAI" else ENUM["question_type"],
+             "question_type": {"ESAI": ENUM["question_type_esai"], "PGK": ENUM["question_type_pgk"]}.get(
+                 str(s.get("jenis", "PG")).upper(), ENUM["question_type"]),
              "question_text": s["soal"],
              "correct_answer": s["kunci"], "points": 1,
              "passage_id": passage_ids.get(s.get("bacaan_id"))}
@@ -817,7 +855,7 @@ def cek_integritas(semua_rows):
             if (q["exam_id"], q["question_number"]) in nomor: masalah.append(f"nomor ganda di exam {q['exam_id'][:8]}: {q['question_number']}")
             nomor.add((q["exam_id"], q["question_number"]))
             labels = {o["option_label"] for o in r["question_options"] if o["question_id"] == q["id"]}
-            if q["correct_answer"] and q["correct_answer"] not in labels: masalah.append(f"kunci {q['correct_answer']} tidak ada di opsi (soal {q['question_number']})")
+            if q["correct_answer"] and not set(kunci_ganda(q["correct_answer"])) <= labels: masalah.append(f"kunci {q['correct_answer']} tidak ada di opsi (soal {q['question_number']})")
             if q.get("passage_id") and q["passage_id"] not in pids: masalah.append(f"passage_id tidak ditemukan (soal {q['question_number']})")
         for t in ("question_options", "question_files"):
             masalah += [f"{t} yatim: {x['id'][:8]}" for x in r[t] if x["question_id"] not in qids]
@@ -857,6 +895,7 @@ def ringkasan_soal(data):
     bacaan = sorted(grup.values(), key=lambda g: g["mulai_no"])
 
     pg = sum(1 for s in data if jenis(s) == "PG")
+    pgk = sum(1 for s in data if jenis(s) == "PGK")
     esai = sum(1 for s in data if jenis(s) == "ESAI")
 
     g_s = sum(n(s, "gambar") for s in data)
@@ -867,8 +906,9 @@ def ringkasan_soal(data):
 
     return {
         "jumlah_pg": pg,
+        "jumlah_pgk": pgk,
         "jumlah_esai": esai,
-        "jumlah_lain": len(data) - pg - esai,
+        "jumlah_lain": len(data) - pg - pgk - esai,
 
         "jumlah_gambar": g_s + g_b,
         "gambar_soal": g_s,

@@ -1,6 +1,6 @@
 ﻿import "server-only";
 import { createAdminClient } from "@/lib/supabase/admin";
-import type { HasilSimpan, ParserFile, PratinjauFile } from "./types";
+import type { HasilSimpan, ParserFile, PratinjauFile, ItemPeriksa } from "./types";
 import { isUuid, mimeDari } from "./util";
 
 const BUCKET_GAMBAR = "question-images";
@@ -23,6 +23,7 @@ export function keRingkasan(f: ParserFile): PratinjauFile {
     guru: f.meta?.guru?.nilai ?? null,
     catatan: [...(f.errors ?? []), ...(f.warnings ?? [])],
     ringkasan: f.ringkasan,
+    butir: keButir(f),
   };
 }
 
@@ -199,4 +200,103 @@ export async function simpanSatu(
       alasan: error instanceof Error ? error.message : "Terjadi kesalahan.",
     };
   }
+}
+
+type Baris = Record<string, any>;
+
+const MAKS_GAMBAR_B64 = 400_000; // gambar lebih besar dari ini tidak ikut dikirim
+
+// Butir pemeriksaan disusun dari hasil parser (f.soal dan f.bacaan), bukan dari f.rows:
+// rows hanya dibuat saat simpan, jadi pada pratinjau butir akan kosong; dan nama kolom DB
+// tidak perlu ditebak. Jenis soal (PG / PGK / ESAI) dan kunci sudah jelas dari parser.
+export function keButir(f: ParserFile): ItemPeriksa[] {
+  const soal = [...((f.soal ?? []) as Baris[])].sort(
+    (a, b) => Number(a.no ?? 0) - Number(b.no ?? 0)
+  );
+  const bacaan = (f.bacaan ?? []) as Baris[];
+  if (soal.length === 0) return [];
+
+  const pesan = [...(f.errors ?? []), ...(f.warnings ?? [])];
+
+  const gambar = (nama: unknown): string[] =>
+    (Array.isArray(nama) ? nama : [])
+      .map((n) => {
+        const fileName = String(n ?? "");
+        const b64 = f.images?.[fileName];
+        if (!b64 || b64.length > MAKS_GAMBAR_B64) return null;
+        const base = fileName.split(/[\\/]/).pop() ?? fileName;
+        return `data:${mimeDari(base)};base64,${b64}`;
+      })
+      .filter((x): x is string => !!x);
+
+  // Label sama dengan yang dipakai pesan validasi parser, mis. "Bacaan 1-5".
+  const labelBacaan = (b: Baris) => `Bacaan ${b.rentang_mentah || `${b.mulai}-${b.akhir}`}`;
+
+  const hasil: ItemPeriksa[] = [];
+  const sudahTampil = new Set<string>();
+
+  soal.forEach((s, i) => {
+    const no = Number(s.no ?? i + 1);
+    const b = s.bacaan_id ? bacaan.find((x) => x.id === s.bacaan_id) : undefined;
+
+    // Bacaan muncul sekali, tepat sebelum soal pertama dalam rentangnya.
+    if (b && !sudahTampil.has(b.id)) {
+      sudahTampil.add(b.id);
+      const label = labelBacaan(b);
+      hasil.push({
+        id: `b-${b.id}`,
+        tipe: "bacaan",
+        teks: String(b.teks ?? ""),
+        gambar: gambar(b.gambar),
+        rumus: b.rumus?.length ? b.rumus : undefined,
+        no_mulai: Number(b.mulai ?? no),
+        jumlah_soal: soal.filter((x) => x.bacaan_id === b.id).length,
+        peringatan: pesan.filter(
+          (m) =>
+            m.includes(`${label}:`) ||
+            m.includes(`${label} dan `) ||
+            m.includes(` dan ${label}:`)
+        ),
+      });
+    }
+
+    const jenisMentah = String(s.jenis ?? "PG").toUpperCase();
+    const jenis: "PG" | "PGK" | "ESAI" | "LAIN" =
+      jenisMentah === "PG" || jenisMentah === "PGK" || jenisMentah === "ESAI"
+        ? jenisMentah
+        : "LAIN";
+
+    // Kunci: "B" untuk PG, "A,C" untuk PGK. Opsi yang termasuk kunci ditandai benar.
+    const kunciHuruf = String(s.kunci ?? "")
+      .split(",")
+      .map((k) => k.trim().toUpperCase())
+      .filter(Boolean);
+
+    const opsi = Object.entries((s.opsi ?? {}) as Record<string, unknown>)
+      .map(([label, teks]) => ({
+        label,
+        teks: String(teks ?? ""),
+        benar: jenis !== "ESAI" && kunciHuruf.includes(label.toUpperCase()),
+      }))
+      .sort((x, y) => x.label.localeCompare(y.label));
+
+    // Pesan untuk soal ini, mis. "No 4: kunci 'E' tidak ada di opsi" (tidak menyamai "No 41").
+    const polaNo = new RegExp(`^(?:Soal|No)\\s+${no}(?!\\d)`, "i");
+
+    hasil.push({
+      id: `s-${no}-${i}`,
+      tipe: "soal",
+      no,
+      jenis,
+      teks: String(s.soal ?? ""),
+      gambar: gambar(s.gambar),
+      rumus: s.rumus?.length ? s.rumus : undefined,
+      opsi: opsi.length ? opsi : undefined,
+      kunci: s.kunci ?? undefined,
+      bacaan_no: b ? Number(b.mulai) : undefined,
+      peringatan: pesan.filter((m) => polaNo.test(m)),
+    });
+  });
+
+  return hasil;
 }

@@ -1,8 +1,9 @@
 ﻿import { NextResponse } from "next/server";
 import { getImportUser, daftarGuru } from "@/lib/import/auth";
 import { panggilParser } from "@/lib/import/parser";
-import { keRingkasan, simpanSatu } from "@/lib/import/save";
+import { keButir, keRingkasan, simpanSatu } from "@/lib/import/save";
 import type { Level } from "@/lib/import/types";
+
 
 export async function POST(request: Request) {
   try {
@@ -60,7 +61,7 @@ export async function POST(request: Request) {
       mode: user.mode,
       uploaderId: user.id,
       guruMap,
-      lengkap: !dryRun,
+      lengkap: true,
     });
 
     if (dryRun) {
