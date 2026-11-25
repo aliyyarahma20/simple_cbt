@@ -4,6 +4,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { apiRequest } from "@/lib/api";
+import { startSiswaSession } from "@/lib/siswa-session";
 import {
   ShieldCheck,
   UserRound,
@@ -57,9 +58,20 @@ export default function LoginPage() {
     setErrorMessage("");
 
     if (role === "Siswa") {
-      alert("Validasi token belum terhubung dengan backend.");
+    const examToken = token.trim().toUpperCase();
+
+    // Validasi sementara (UI saja). Ganti dengan pengecekan ke backend.
+    if (!/^[A-Z0-9]{4,10}$/.test(examToken)) {
+      setErrorMessage(
+        "Token ujian tidak valid. Periksa kembali token dari guru atau POKJA."
+      );
       return;
     }
+
+    startSiswaSession(examToken);
+    router.push("/siswa/biodata");
+    return;
+  }
 
     try {
       setIsLoading(true);
