@@ -2,6 +2,8 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { apiRequest } from "@/lib/api";
 import {
   ShieldCheck,
   UserRound,
@@ -12,7 +14,22 @@ import {
 
 type UserRole = "Guru" | "Siswa";
 
+type LoginResponse = {
+  success: boolean;
+  message: string;
+  data: {
+    user: {
+      id: string;
+      full_name: string;
+      email: string;
+      role: "POKJA" | "GURU";
+    };
+  };
+};
+
 export default function LoginPage() {
+  const router = useRouter();
+
   const [role, setRole] = useState<UserRole>("Guru");
   const [showPassword, setShowPassword] = useState(false);
 
@@ -20,23 +37,57 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [token, setToken] = useState("");
 
+  const [isLoading, setIsLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
+
   const handleRoleChange = (newRole: UserRole) => {
     setRole(newRole);
     setIdentity("");
     setPassword("");
     setToken("");
     setShowPassword(false);
+    setErrorMessage("");
   };
 
-  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (
+    event: React.FormEvent<HTMLFormElement>
+  ) => {
     event.preventDefault();
 
-    if (role === "Guru") {
-      console.log("Login Guru:", { identity, password });
-      alert("Login belum terhubung dengan backend.");
-    } else {
-      console.log("Token Ujian:", token);
+    setErrorMessage("");
+
+    if (role === "Siswa") {
       alert("Validasi token belum terhubung dengan backend.");
+      return;
+    }
+
+    try {
+      setIsLoading(true);
+
+      const result = await apiRequest<LoginResponse>(
+        "/api/auth/login",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            email: identity.trim(),
+            password,
+          }),
+        }
+      );
+
+      if (result.data.user.role === "POKJA") {
+        router.push("/dashboard");
+      } else if (result.data.user.role === "GURU") {
+        router.push("/dashboard");
+      }
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Terjadi kesalahan saat login."
+      );
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -141,11 +192,11 @@ export default function LoginPage() {
               {role === "Guru" ? (
                 <div className="animate-in fade-in duration-300">
 
-                  {/* EMAIL / NIP */}
+                  {/* EMAIL */}
                   <div className="mb-5">
 
                     <label className="block text-sm font-semibold text-[#15395D] mb-2">
-                      Email / NIP
+                      Email
                     </label>
 
                     <div className="relative">
@@ -156,11 +207,11 @@ export default function LoginPage() {
                       />
 
                       <input
-                        type="text"
+                        type="email"
                         required
                         value={identity}
                         onChange={(e) => setIdentity(e.target.value)}
-                        placeholder="Masukkan NIP atau Email"
+                        placeholder="Masukkan email Anda"
                         autoComplete="username"
                         className="w-full h-[54px] pl-11 pr-4 rounded-xl border border-slate-200 bg-[#F8FAFD] text-sm text-slate-700 placeholder:text-slate-400 outline-none focus:border-[#15395D] focus:ring-2 focus:ring-blue-100 transition"
                       />
@@ -267,12 +318,27 @@ export default function LoginPage() {
 
               )}
 
+              {/* ERROR MESSAGE */}
+              {errorMessage && role === "Guru" && (
+                <div
+                  role="alert"
+                  className="mb-4 rounded-xl bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-600"
+                >
+                  {errorMessage}
+                </div>
+              )}
+
               {/* SUBMIT BUTTON */}
               <button
                 type="submit"
-                className="w-full h-[54px] bg-[#15395D] hover:bg-[#102E4C] active:scale-[0.99] text-white font-semibold rounded-xl transition-all duration-200"
+                disabled={isLoading}
+                className="w-full h-[54px] bg-[#15395D] hover:bg-[#102E4C] active:scale-[0.99] text-white font-semibold rounded-xl transition-all duration-200 disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                {role === "Guru" ? "Masuk" : "Lanjutkan"}
+                {isLoading
+                  ? "Memproses..."
+                  : role === "Guru"
+                    ? "Masuk"
+                    : "Lanjutkan"}
               </button>
 
             </form>

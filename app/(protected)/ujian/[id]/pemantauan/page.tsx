@@ -17,11 +17,11 @@ export default function MonitoringExamPage({ params }: PageProps) {
   return (
     <Suspense
       fallback={
-        <main className="flex min-h-screen items-center justify-center bg-[#F5F8FC]">
+        <div className="flex min-h-[60vh] items-center justify-center">
           <p className="text-sm font-medium text-[#15395D]">
             Memuat pemantauan ujian...
           </p>
-        </main>
+        </div>
       }
     >
       <MonitoringExamContent params={params} />

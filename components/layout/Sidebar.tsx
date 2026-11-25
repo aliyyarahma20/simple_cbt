@@ -11,6 +11,7 @@ import {
   Upload,
   ChartNoAxesCombined,
   SlidersHorizontal,
+  LogOut,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -18,8 +19,10 @@ type SidebarProps = {
   activePage: string;
   onNavigate: (label: string) => void;
   onAction?: (label: string) => void;
-  userName?: string;
-  userRole?: string;
+  onLogout?: () => void;
+  isLoggingOut?: boolean;
+  userName: string;
+  userRole: string;
 };
 
 const navigation: { label: string; icon: LucideIcon }[] = [
@@ -40,8 +43,10 @@ export default function Sidebar({
   activePage,
   onNavigate,
   onAction,
-  userName = "Budi Santoso",
-  userRole = "Guru",
+  onLogout,
+  isLoggingOut = false,
+  userName,
+  userRole,
 }: SidebarProps) {
   const initials = userName
     .split(" ")
@@ -135,6 +140,15 @@ export default function Sidebar({
           </div>
 
         </div>
+
+        <button
+          onClick={onLogout}
+          disabled={isLoggingOut}
+          className="w-full mt-4 flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium text-red-500 hover:bg-red-50 transition disabled:opacity-60 disabled:cursor-not-allowed"
+        >
+          <LogOut size={19} />
+          {isLoggingOut ? "Keluar..." : "Keluar"}
+        </button>
       </div>
 
     </aside>

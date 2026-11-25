@@ -7,16 +7,16 @@ type TopbarProps = {
   title: string;
   subtitle: string;
   onNotificationClick: () => void;
-  userName?: string;
-  userRole?: string;
+  userName: string;
+  userRole: string;
 };
 
 export default function Topbar({
   title,
   subtitle,
   onNotificationClick,
-  userName = "Budi Santoso",
-  userRole = "Guru - SMKN 2 Garut",
+  userName,
+  userRole,
 }: TopbarProps) {
   const initials = userName
     .split(" ")
