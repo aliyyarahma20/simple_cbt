@@ -7,7 +7,11 @@ import { useEffect, useRef } from 'react';
 export type ViolationType =
   | 'TAB_SWITCH'
   | 'WINDOW_BLUR'
-  | 'EXIT_FULLSCREEN';
+  | 'EXIT_FULLSCREEN'
+  | 'COPY'
+  | 'CUT'
+  | 'PASTE'
+  | 'SCREENSHOT';
 
 interface ExamSecurityMonitorProps {
   onViolation: (type: ViolationType) => void;
@@ -54,7 +58,39 @@ export default function ExamSecurityMonitor({
       handleLeaveExam();
     };
 
-    // 2. DETEKSI PESERTA KELUAR FULLSCREEN
+        // 2. DETEKSI AKTIVITAS CLIPBOARD
+
+    // Mendeteksi ketika peserta menyalin teks.
+    const handleCopy = () => {
+      onViolation('COPY');
+
+      console.log('[EXAM SECURITY] Pelanggaran: Copy');
+    };
+
+    // Mendeteksi ketika peserta memotong teks.
+    const handleCut = () => {
+      onViolation('CUT');
+
+      console.log('[EXAM SECURITY] Pelanggaran: Cut');
+    };
+
+    // Mendeteksi ketika peserta menempelkan teks.
+    const handlePaste = () => {
+      onViolation('PASTE');
+
+      console.log('[EXAM SECURITY] Pelanggaran: Paste');
+    };
+
+        // Mendeteksi tombol PrintScreen jika event diterima browser.
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'PrintScreen') {
+        onViolation('SCREENSHOT');
+
+        console.log('[EXAM SECURITY] Tombol PrintScreen terdeteksi');
+      }
+    };
+
+    // 3. DETEKSI PESERTA KELUAR FULLSCREEN
 
     const handleFullscreenChange = () => {
       // Membaca status fullscreen terbaru dari browser.
@@ -89,13 +125,23 @@ export default function ExamSecurityMonitor({
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('blur', handleWindowBlur);
     document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('copy', handleCopy);
+    document.addEventListener('cut', handleCut);
+    document.addEventListener('paste', handlePaste);
+    window.addEventListener('keydown', handleKeyDown);
 
-    // 4. MEMBERSIHKAN EVENT LISTENER
 
+        // 4. MEMBERSIHKAN EVENT LISTENER
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('blur', handleWindowBlur);
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
+
+      // Membersihkan listener aktivitas clipboard.
+      document.removeEventListener('copy', handleCopy);
+      document.removeEventListener('cut', handleCut);
+      document.removeEventListener('paste', handlePaste);
+      window.removeEventListener('keydown', handleKeyDown);
     };
   }, [onViolation, onFullscreenChange]);
 

@@ -1,4 +1,3 @@
-
 'use client';
 
 import { useRef, useState } from 'react';
@@ -28,11 +27,14 @@ export default function KerjakanUjianPage() {
   // Menyimpan status apakah ujian sudah selesai.
   const [isSubmitted, setIsSubmitted] = useState(false);
 
-  // Ref digunakan agar jumlah pelanggaran selalu terbaca secara langsung.
+  // Ref agar jumlah pelanggaran selalu terbaca secara langsung.
   const violationCountRef = useRef(0);
 
   // Mencegah pelanggaran dihitung setelah ujian selesai.
   const isSubmittedRef = useRef(false);
+
+  // Menyimpan audio yang diaktifkan saat peserta mulai ujian.
+  const audioContextRef = useRef<AudioContext | null>(null);
 
   // Mengubah kode pelanggaran menjadi teks.
   const getViolationMessage = (type: ViolationType) => {
@@ -46,10 +48,62 @@ export default function KerjakanUjianPage() {
       case 'EXIT_FULLSCREEN':
         return 'Keluar dari mode fullscreen terdeteksi';
 
+      case 'COPY':
+        return 'Menyalin teks (Copy) terdeteksi';
+
+      case 'CUT':
+        return 'Memotong teks (Cut) terdeteksi';
+
+      case 'PASTE':
+        return 'Menempelkan teks (Paste) terdeteksi';
+
+      case 'SCREENSHOT':
+        return 'Tombol PrintScreen terdeteksi';
+
       default:
         return 'Pelanggaran terdeteksi';
     }
   };
+
+  // Memberikan peringatan melalui getaran atau bunyi.
+  const playViolationAlert = () => {
+  // Coba getaran jika browser mendukungnya.
+  const vibrationNavigator = navigator as Navigator & {
+    vibrate?: (pattern: number | number[]) => boolean;
+  };
+
+  if (typeof vibrationNavigator.vibrate === 'function') {
+    vibrationNavigator.vibrate(200);
+  }
+
+  // Bunyi tetap diputar meskipun API getaran tersedia.
+  const audioContext = audioContextRef.current;
+
+  if (!audioContext) {
+    console.warn('[EXAM] Audio belum diaktifkan.');
+    return;
+  }
+
+  void audioContext
+    .resume()
+    .then(() => {
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+
+      oscillator.type = 'sine';
+      oscillator.frequency.value = 880;
+      gainNode.gain.value = 0.15;
+
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+
+      oscillator.start();
+      oscillator.stop(audioContext.currentTime + 0.18);
+    })
+    .catch((error) => {
+      console.warn('[EXAM] Peringatan bunyi tidak dapat diputar:', error);
+    });
+};
 
   // Menangani laporan pelanggaran dari monitor.
   const handleViolation = (type: ViolationType) => {
@@ -72,7 +126,10 @@ export default function KerjakanUjianPage() {
       type,
     });
 
-    // Jika pelanggaran ketiga, ujian langsung selesai.
+    // Bunyi atau getaran untuk pelanggaran yang dihitung.
+    playViolationAlert();
+
+    // Jika pelanggaran ketiga, ujian langsung ditandai selesai.
     if (newCount === 3) {
       isSubmittedRef.current = true;
       setIsSubmitted(true);
@@ -81,10 +138,24 @@ export default function KerjakanUjianPage() {
     }
   };
 
-  // Memulai ujian dengan mengaktifkan fullscreen.
+  // Memulai ujian dengan mengaktifkan audio dan fullscreen.
   const handleStartExam = async () => {
     if (isSubmittedRef.current) return;
 
+    // Aktifkan audio dari klik Mulai Ujian agar browser mengizinkannya.
+    try {
+      if (!audioContextRef.current) {
+        audioContextRef.current = new AudioContext();
+      }
+
+      void audioContextRef.current.resume().catch((error) => {
+        console.warn('[EXAM] Audio belum dapat diaktifkan:', error);
+      });
+    } catch (error) {
+      console.warn('[EXAM] Audio tidak tersedia:', error);
+    }
+
+    // Minta fullscreen dari klik yang sama.
     try {
       await document.documentElement.requestFullscreen();
 
@@ -110,7 +181,6 @@ export default function KerjakanUjianPage() {
       />
 
       <div className="mx-auto max-w-2xl space-y-6">
-
         {/* Status ujian */}
         {isSubmitted && (
           <section
@@ -238,7 +308,6 @@ export default function KerjakanUjianPage() {
             </ul>
           )}
         </section>
-
       </div>
     </main>
   );
